@@ -9,61 +9,69 @@
 
 co-scienza is a **personal, offline-first knowledge base** for capturing, reading, annotating,
 and querying any type of source — papers, web pages, videos, audio, notes — with AI as a
-built-in layer for extraction and querying.
+built-in layer for extraction and chat.
 
-Your data lives **on your terms**: stored as readable files (markdown + PDFs) synced to
-Google Drive, with a local index for fast search and AI.
+Your data lives **on your terms**: stored as plain markdown + PDFs synced to Google Drive,
+with a local SQLite index for fast search and AI grounding.
 
 ---
 
 ## Core Principles
 
-1. **Data ownership** — all content stored as markdown + PDFs on Google Drive. No vendor lock-in.
+1. **Data ownership** — all content stored as plain markdown + PDFs on Google Drive. Human-readable without the app.
 2. **Offline-first** — fully functional without internet; GDrive sync happens in the background.
-3. **AI as a layer, not a gate** — AI features are optional and pluggable (Anthropic, OpenAI, Gemini, Ollama).
+3. **AI from day one** — chat with your sources (NotebookLM-style) powered by Google ADK + Gemini.
 4. **Mobile-first** — designed for iOS/Android first, accessible on web via Expo Web.
 5. **Personal tool** — no multi-tenancy, no sharing complexity. Just you and your knowledge.
+6. **Plain markdown everywhere** — notes, annotations, extractions: all stored as `.md` files. No proprietary formats.
 
 ---
 
 ## Tech Stack
 
 ### Frontend — Expo (React Native)
+
 | Concern | Choice | Notes |
 |---|---|---|
 | Framework | **Expo SDK** (React Native) | iOS, Android, Web (Expo Web) |
 | Navigation | **Expo Router** | File-based routing, works on web too |
-| Editor | **TenTap (`@10play/tentap-editor`)** | TipTap-based block editor for RN — supports paragraphs, headings, lists, code, quotes, bold/italic |
-| PDF viewer | **react-native-pdf** | Mobile; web fallback via iframe or PDF.js |
+| Editor | **Plain `TextInput`** + `react-native-markdown-display` | Edit/preview toggle — simple, no deps |
+| PDF viewer | **react-native-pdf** | Mobile; web fallback via iframe |
 | Styling | **NativeWind** (Tailwind for RN) | Consistent design system cross-platform |
 | State | **Zustand** | Lightweight, works offline-first |
-| Data sync / cache | **expo-sqlite** + **TanStack Query** | Local SQLite mirror; query cache |
-| Offline storage | **expo-sqlite** (structured) + **expo-file-system** (blobs) | PDFs, markdown cached locally |
+| Local DB | **expo-sqlite** | Local mirror of sources, notes, annotations |
+| File cache | **expo-file-system** | PDFs and markdown cached on device |
+| Networking | **TanStack Query** | Cache, retry, background refetch |
+| Share intent | **expo-share-intent** | Intercept shared URLs/files from other apps |
 | PWA / Web | **Expo Web** | Same codebase, browser-accessible |
 
 ### Backend — Python FastAPI
+
 | Concern | Choice | Notes |
 |---|---|---|
 | Framework | **FastAPI** | Async, typed, fast |
-| Database | **SQLite** via **SQLAlchemy** + **Alembic** | Single-file DB, perfect for self-hosted solo use |
+| Database | **SQLite** via **SQLAlchemy** + **Alembic** | Single-file DB, self-hosted friendly |
 | Vector store | **sqlite-vec** | Embedded vectors in SQLite — zero extra services |
-| Background jobs | **Celery** + **Redis** | Or `asyncio` task queue if Redis feels heavy |
+| Background jobs | **Celery** + **Redis** | Ingestion, embedding, sync jobs |
 | GDrive sync | **google-api-python-client** | Read/write files, manage folder structure |
-| AI / LLM | **LiteLLM** | Single interface for Anthropic, OpenAI, Gemini, Ollama |
-| Embeddings | **LiteLLM** embedding endpoint | Pluggable: OpenAI, Ollama nomic-embed, etc. |
-| PDF text extraction | **pdfminer.six** / **pypdf** | Pure Python, no binary deps |
-| Web scraping | **httpx** + **trafilatura** | URL → clean article text |
+| AI framework | **Google ADK** (`google-adk`) | Agent orchestration, tool use, grounding |
+| Gemini SDK | **Google GenAI SDK** (`google-genai`) | Underlying model access (ADK depends on this) |
+| Grounding / RAG | **ADK custom retrieval tool** → sqlite-vec | Self-hosted RAG; Vertex AI RAG Engine as upgrade path |
+| Gemini model | **`gemini-2.5-flash`** (default) | Fast, large context, free tier available |
+| PDF extraction | **pypdf** + **pymupdf** | Text and page-level extraction |
+| Web scraping | **httpx** + **trafilatura** | URL → clean article markdown |
 | YouTube | **youtube-transcript-api** | Fetch transcripts by URL/ID |
-| Audio | **faster-whisper** or OpenAI Whisper API | Local or cloud transcription |
-| OCR / images | **pytesseract** or multimodal LLM | Image → text |
-| Academic metadata | **httpx** + CrossRef / arXiv / PubMed APIs | DOI, arXiv ID, PubMed ID resolution |
+| Audio | **faster-whisper** (local) or Gemini audio input | Transcription — configurable |
+| OCR / images | Gemini multimodal (`gemini-2.5-flash`) | Image → description/text |
+| Academic APIs | CrossRef, arXiv, PubMed (via httpx) | DOI / arXiv ID / PubMed ID resolution |
 
 ### Infrastructure
+
 | Concern | Choice |
 |---|---|
 | Containerization | **Docker Compose** |
-| Reverse proxy | **Caddy** (optional, for HTTPS) |
-| File serving | FastAPI static files or Caddy |
+| Services | `backend`, `worker`, `redis`, optional `web` (nginx) |
+| Reverse proxy | **Caddy** (optional, for HTTPS on self-hosted) |
 
 ---
 
@@ -72,23 +80,49 @@ Google Drive, with a local index for fast search and AI.
 ```
 co-scienza/
 ├── apps/
-│   └── mobile/               ← Expo app (iOS, Android, Web)
-│       ├── app/              ← Expo Router screens
+│   └── mobile/                    ← Expo app (iOS, Android, Web)
+│       ├── app/                   ← Expo Router screens
+│       │   ├── (tabs)/
+│       │   │   ├── library.tsx    ← source library
+│       │   │   ├── notes.tsx      ← notes list
+│       │   │   └── chat.tsx       ← AI chat
+│       │   ├── source/[id].tsx    ← source detail + reader
+│       │   ├── note/[id].tsx      ← markdown editor/preview
+│       │   └── settings.tsx
 │       ├── components/
 │       ├── hooks/
-│       ├── store/            ← Zustand stores
-│       └── lib/              ← API client, sync logic
+│       ├── store/                 ← Zustand stores
+│       └── lib/
+│           ├── api.ts             ← FastAPI client
+│           └── sync.ts            ← offline sync logic
 ├── backend/
 │   ├── app/
-│   │   ├── api/              ← FastAPI routers
-│   │   ├── models/           ← SQLAlchemy models
+│   │   ├── api/                   ← FastAPI routers
+│   │   │   ├── sources.py
+│   │   │   ├── notes.py
+│   │   │   ├── chat.py            ← ADK chat endpoint (SSE streaming)
+│   │   │   └── sync.py
+│   │   ├── models/                ← SQLAlchemy models
 │   │   ├── services/
-│   │   │   ├── ingest/       ← importers per source type
-│   │   │   ├── ai/           ← LLM, embeddings, RAG
-│   │   │   └── gdrive/       ← GDrive sync engine
-│   │   ├── workers/          ← Celery tasks
+│   │   │   ├── ingest/            ← one module per source type
+│   │   │   │   ├── pdf.py
+│   │   │   │   ├── url.py
+│   │   │   │   ├── doi.py
+│   │   │   │   ├── arxiv.py
+│   │   │   │   ├── youtube.py
+│   │   │   │   ├── audio.py
+│   │   │   │   └── image.py
+│   │   │   ├── ai/
+│   │   │   │   ├── agent.py       ← ADK root agent definition
+│   │   │   │   ├── tools.py       ← retrieve_from_library, search_sources, etc.
+│   │   │   │   └── embeddings.py  ← chunk + embed pipeline
+│   │   │   └── gdrive/
+│   │   │       ├── client.py      ← GDrive API wrapper
+│   │   │       └── sync.py        ← bidirectional sync engine
+│   │   ├── workers/               ← Celery task definitions
 │   │   └── main.py
-│   ├── alembic/              ← DB migrations
+│   ├── alembic/                   ← DB migrations
+│   ├── Dockerfile
 │   └── requirements.txt
 ├── docker-compose.yml
 ├── .env.example
@@ -105,231 +139,256 @@ GDrive: /co-scienza/
 │   └── {year}/
 │       └── {slug}/
 │           ├── source.pdf          ← original file (if applicable)
-│           ├── metadata.json       ← structured metadata
-│           ├── content.md          ← extracted/scraped text
-│           └── annotations.md      ← highlights + notes
+│           ├── metadata.json       ← structured metadata (authors, year, etc.)
+│           ├── content.md          ← extracted/scraped text as markdown
+│           └── annotations.md      ← highlights + notes (plain markdown)
 ├── notes/
-│   └── {slug}.md                   ← standalone notes
+│   └── {slug}.md                   ← standalone notes (plain markdown)
 ├── collections/
-│   └── {name}.json                 ← collection definitions
-└── config.json                     ← app config (AI provider, sync prefs)
+│   └── {name}.json
+└── config.json                     ← AI provider config, sync prefs
 ```
 
 ---
 
-## Data Model (SQLite — backend)
+## Data Model (SQLite)
 
 ```sql
--- Sources: any imported content
 CREATE TABLE sources (
   id TEXT PRIMARY KEY,
   title TEXT,
-  type TEXT,        -- pdf | url | doi | arxiv | youtube | audio | image | note
+  type TEXT,          -- pdf | url | doi | arxiv | youtube | audio | image | text
   url TEXT,
-  doi TEXT,
-  arxiv_id TEXT,
+  doi TEXT, arxiv_id TEXT,
   gdrive_file_id TEXT,
   local_cache_path TEXT,
-  status TEXT,      -- pending | processing | ready | failed
-  metadata JSON,    -- authors, year, journal, abstract, duration, etc.
-  created_at DATETIME,
-  updated_at DATETIME,
-  synced_at DATETIME
+  status TEXT,        -- pending | processing | ready | failed
+  metadata JSON,      -- authors, year, journal, abstract, duration, etc.
+  created_at DATETIME, updated_at DATETIME, synced_at DATETIME
 );
 
--- Annotations on sources (highlights, notes, questions)
 CREATE TABLE annotations (
   id TEXT PRIMARY KEY,
   source_id TEXT REFERENCES sources(id),
-  type TEXT,        -- highlight | note | comment | question | key-claim
-  content TEXT,     -- markdown
-  position JSON,    -- {page, rects} for PDF; {start, end} for text
+  type TEXT,          -- highlight | note | question | key-claim
+  content TEXT,       -- plain markdown
+  position JSON,      -- {page, char_start, char_end}
   color TEXT,
   created_at DATETIME
 );
 
--- Standalone notes (block-based, markdown)
 CREATE TABLE notes (
   id TEXT PRIMARY KEY,
   title TEXT,
-  content TEXT,     -- markdown / TenTap JSON blocks
+  content TEXT,       -- plain markdown
   gdrive_file_id TEXT,
-  created_at DATETIME,
-  updated_at DATETIME
+  created_at DATETIME, updated_at DATETIME
 );
 
--- Tags (apply to sources, notes, annotations)
 CREATE TABLE tags (id TEXT PRIMARY KEY, name TEXT, color TEXT);
 CREATE TABLE source_tags (source_id TEXT, tag_id TEXT);
 CREATE TABLE note_tags (note_id TEXT, tag_id TEXT);
 
--- Bidirectional links between notes / sources
 CREATE TABLE links (
-  from_id TEXT, from_type TEXT,
+  from_id TEXT, from_type TEXT,   -- source | note
   to_id TEXT,   to_type TEXT
 );
 
--- Collections / Libraries
 CREATE TABLE collections (
   id TEXT PRIMARY KEY, name TEXT, description TEXT, created_at DATETIME
 );
 CREATE TABLE collection_items (
-  collection_id TEXT, item_id TEXT, item_type TEXT -- source | note
+  collection_id TEXT, item_id TEXT, item_type TEXT  -- source | note
 );
 
--- Vector embeddings for RAG
-CREATE TABLE embeddings (
+-- Chunks + embeddings for RAG
+CREATE TABLE chunks (
   id TEXT PRIMARY KEY,
-  entity_id TEXT, entity_type TEXT,   -- source | note | annotation
+  entity_id TEXT, entity_type TEXT,  -- source | note | annotation
   chunk_text TEXT,
   chunk_index INTEGER,
   model_id TEXT,
-  vector BLOB  -- stored via sqlite-vec
+  vector BLOB    -- via sqlite-vec
 );
 
--- GDrive sync log
 CREATE TABLE sync_log (
   id TEXT PRIMARY KEY,
   entity_id TEXT, entity_type TEXT,
-  action TEXT,      -- create | update | delete
+  action TEXT,   -- create | update | delete
   gdrive_file_id TEXT,
-  status TEXT,      -- pending | done | conflict | failed
+  status TEXT,   -- pending | done | conflict | failed
   synced_at DATETIME
 );
+
+-- ADK session persistence
+CREATE TABLE adk_sessions (
+  session_id TEXT PRIMARY KEY,
+  state JSON,
+  created_at DATETIME, updated_at DATETIME
+);
 ```
+
+---
+
+## AI Architecture — Google ADK
+
+### Agent definition (`agent.py`)
+
+```python
+from google.adk.agents import Agent
+from app.services.ai.tools import (
+    retrieve_from_library,
+    search_sources_by_metadata,
+    get_source_content,
+)
+
+root_agent = Agent(
+    name="coscienza_assistant",
+    model="gemini-2.5-flash",
+    description="Personal knowledge assistant. Answers questions grounded in the user's library.",
+    instruction="""You are a personal research assistant with access to the user's knowledge library.
+Always ground your answers in the retrieved content. Cite sources with title and page/section.
+If you don't find relevant content, say so clearly.""",
+    tools=[
+        retrieve_from_library,   # semantic vector search → returns chunks
+        search_sources_by_metadata,  # filter by author, year, type, tag
+        get_source_content,      # fetch full content of a specific source
+    ],
+)
+```
+
+### Streaming chat endpoint
+
+```python
+# POST /api/chat  →  SSE stream
+# - Creates or resumes an ADK session
+# - Streams Gemini response tokens as Server-Sent Events
+# - Citations attached to response events
+```
+
+### RAG tool (custom, self-hosted)
+
+```python
+@tool
+async def retrieve_from_library(query: str, top_k: int = 5) -> list[dict]:
+    """Retrieve relevant chunks from the user's library using semantic search."""
+    embedding = await embed(query)
+    chunks = sqlite_vec_search(embedding, top_k)
+    return [{"text": c.chunk_text, "source": c.entity_id, "title": c.title} for c in chunks]
+```
+
+**Upgrade path**: swap `sqlite_vec_search` for `VertexAiRagRetrieval` if moving to Vertex AI RAG Engine (no agent code changes needed).
 
 ---
 
 ## Feature Phases
 
-### Phase 1 — Foundation + Source Ingestion (MVP)
+### Phase 1 — Foundation + Ingestion + Chat with Sources (MVP)
 
-**Goal**: Import any content, extract text, store locally + sync to GDrive.
+**Goal**: Import any content, store in GDrive, and immediately chat with it.
 
 #### Backend setup
-- [ ] FastAPI project with SQLAlchemy + Alembic migrations
-- [ ] SQLite DB initialization
-- [ ] Google OAuth flow → store access/refresh token
+- [ ] FastAPI project, SQLAlchemy models, Alembic migrations
+- [ ] SQLite + sqlite-vec initialization
+- [ ] Google OAuth → GDrive access token storage
 - [ ] GDrive folder structure initialization on first run
-- [ ] Background job queue (Celery + Redis, or asyncio)
-- [ ] Docker Compose: `backend` + `redis` services
+- [ ] Celery + Redis worker setup
+- [ ] Docker Compose: `backend`, `worker`, `redis`
 
-#### Expo app setup
-- [ ] Expo project with Expo Router
-- [ ] NativeWind configuration
-- [ ] Zustand store setup
-- [ ] API client (httpx/fetch wrapper pointing to backend)
-- [ ] expo-sqlite local mirror schema
-
-#### Importers (backend services)
-- [ ] **PDF upload** — extract text (pypdf), store file in GDrive, index in SQLite
-- [ ] **URL** — fetch → trafilatura → clean markdown → GDrive
-- [ ] **DOI** — CrossRef API → metadata + Unpaywall PDF link → download → GDrive
+#### Importers (Celery tasks)
+- [ ] **PDF upload** — pypdf text extraction → chunk → embed → GDrive
+- [ ] **URL** — trafilatura → markdown → chunk → embed → GDrive
+- [ ] **DOI** — CrossRef API → metadata + Unpaywall PDF → GDrive
 - [ ] **arXiv ID / URL** — arXiv API → metadata + PDF → GDrive
 - [ ] **PubMed ID** — NCBI API → metadata + PDF fallback
-- [ ] **YouTube URL** — youtube-transcript-api → markdown → GDrive
-- [ ] **Audio file** — faster-whisper or OpenAI Whisper API → transcript → GDrive
-- [ ] **Image** — pytesseract OCR or multimodal LLM → description → GDrive
-- [ ] **Plain text / markdown paste** — direct input → GDrive
+- [ ] **YouTube URL** — youtube-transcript-api → markdown → chunk → embed → GDrive
+- [ ] **Audio file** — faster-whisper → transcript markdown → chunk → embed → GDrive
+- [ ] **Image** — Gemini multimodal → description markdown → embed → GDrive
+- [ ] **Plain text / markdown paste** — direct input → embed → GDrive
 
-#### Source Library (mobile UI)
-- [ ] Source list screen (searchable, filterable by type/tag/status)
-- [ ] Source grid view (cover image / type icon)
-- [ ] Import sheet (bottom sheet with source type picker)
-- [ ] Import status: queued → processing → ready (live polling or SSE)
-- [ ] Source detail screen (metadata, status, quick actions)
+#### Share intent (mobile)
+- [ ] **expo-share-intent** configured for iOS Share Extension + Android intent filters
+- [ ] Shared URL / file opens app → bottom sheet with pre-filled import form
+- [ ] Background import if app is closed (Expo Background Task)
+
+#### Source library (mobile UI)
+- [ ] Source list screen: search, filter by type / tag / status
+- [ ] Import bottom sheet: pick type or auto-detect from URL/file
+- [ ] Import status polling (pending → processing → ready)
+- [ ] Source detail screen: metadata, tags, quick actions
+
+#### Chat with sources (ADK)
+- [ ] ADK root agent + tools wired up (`retrieve_from_library`, `search_sources_by_metadata`)
+- [ ] `POST /api/chat` SSE streaming endpoint
+- [ ] Chat screen in app (streaming tokens, citations as tappable chips)
+- [ ] Scoped chat: all library / selected collection / selected source(s)
+- [ ] Session persistence (resume conversation across app restarts)
+- [ ] Gemini API key configuration in settings screen
 
 ---
 
-### Phase 2 — PDF Reader + Annotations
+### Phase 2 — Reader + Annotations
 
-**Goal**: Read sources in-app, highlight, add notes — saved back to GDrive.
+**Goal**: Read sources in-app, highlight and annotate — saved as plain markdown to GDrive.
 
-- [ ] PDF reader screen using `react-native-pdf`
-- [ ] Text selection → highlight (color picker bottom sheet)
-- [ ] Selection → inline note (markdown input)
-- [ ] Annotation sidebar: all highlights/notes for current document by page
+- [ ] PDF reader screen (`react-native-pdf`)
+- [ ] Text selection → highlight (color picker)
+- [ ] Selection → inline note (plain text input)
+- [ ] Non-PDF sources: scrollable markdown renderer with inline tap-to-annotate
+- [ ] Annotations sidebar: all highlights + notes for current source, by page
 - [ ] Annotation types: highlight, note, question, key-claim
-- [ ] Annotations serialized to `annotations.md` sidecar in GDrive
-- [ ] Keyboard shortcuts on web (Expo Web)
-- [ ] Non-PDF sources: rendered markdown reader with inline annotation
+- [ ] Annotations serialized to `annotations.md` sidecar in GDrive (plain markdown)
+- [ ] "Ask AI about this" — select text → send to chat with context pre-filled
 
 ---
 
-### Phase 3 — Knowledge Base + Editor
+### Phase 3 — Notes + Knowledge Base
 
-**Goal**: Write notes, link them to sources and each other, organize everything.
+**Goal**: Write plain markdown notes, link them to sources, organize everything.
 
-- [ ] Note editor screen using **TenTap** blocks:
-  - Paragraph, heading (H1–H3), bullet list, numbered list, blockquote, code block
-  - Bold, italic, underline, strikethrough, inline code
-- [ ] `[[wikilink]]` autocomplete → link to other notes or sources
-- [ ] Backlinks panel per note/source
-- [ ] Tags system (add, remove, filter by tag)
-- [ ] Collections: group sources + notes manually
-- [ ] Views: list, grid, kanban (by tag or status), timeline (by date)
-- [ ] Notes saved as `.md` in GDrive + mirrored to expo-sqlite
-- [ ] Full-text search across sources + notes (SQLite FTS5 on backend)
-- [ ] Quick capture: share-sheet integration on iOS/Android (Expo Share Intent)
+- [ ] Note list screen (searchable, sorted by date / title)
+- [ ] Note editor: plain markdown `TextInput` + preview toggle (`react-native-markdown-display`)
+- [ ] `[[wikilink]]` mention autocomplete → links to notes or sources
+- [ ] Backlinks section at bottom of each note/source
+- [ ] Tags: add, remove, filter
+- [ ] Collections: manually group sources + notes
+- [ ] Views: list, grid (by type icon / cover), timeline (by date)
+- [ ] Notes stored as `.md` in GDrive, mirrored to expo-sqlite
+- [ ] Full-text search across notes + sources (SQLite FTS5)
+- [ ] Quick capture from share sheet: URL → import, text → new note
 
 ---
 
-### Phase 4 — AI Querying + Extraction
+### Phase 4 — AI Extraction
 
-**Goal**: Ask questions, get cited answers, extract structured data automatically.
+**Goal**: Automatically extract structured data from sources; custom extraction templates.
 
-#### Embedding pipeline
-- [ ] Chunking strategy: sliding window, configurable size
-- [ ] Embed chunks on ingestion (background Celery task)
-- [ ] sqlite-vec for vector storage alongside metadata DB
-- [ ] Re-embed on content update
-
-#### RAG chat interface
-- [ ] Chat screen: ask questions, stream answers via SSE
-- [ ] Answers include source citations (tap → open source at location)
-- [ ] Scoped queries: all library / selected collection / selected sources
-- [ ] Hybrid search: vector similarity + FTS keyword
-
-#### Structured extraction (per source)
-- [ ] Auto-extract on ingestion: authors, year, journal, abstract (LLM fallback)
-- [ ] Key claims / contributions
-- [ ] Methodology summary
-- [ ] Open questions / limitations
-- [ ] Custom extraction templates (user-defined JSON schema → LLM extraction)
-
-#### AI summaries
-- [ ] One-tap summary per source
+- [ ] Auto-extraction on ingestion: authors, year, journal, abstract (Gemini, LLM fallback)
+- [ ] Per-source AI actions: key claims, methodology summary, open questions
+- [ ] Custom extraction templates: user-defined prompts → output saved as markdown section
 - [ ] Comparative summary across selected sources
-- [ ] "Explain to me simply" mode
-
-#### AI provider configuration
-- [ ] Settings screen: provider + model picker
-- [ ] Supported: Anthropic Claude, OpenAI GPT, Google Gemini, Ollama (local URL)
-- [ ] API keys stored in `expo-secure-store` (encrypted on device)
-- [ ] Separate config for chat model vs. embedding model
-- [ ] Test connection button
+- [ ] AI-generated tags suggestions
+- [ ] AI agent gains new tools: `extract_structured_data`, `summarize_source`, `compare_sources`
 
 ---
 
 ### Phase 5 — Offline + GDrive Sync
 
-**Goal**: Fully functional offline; transparent sync to GDrive when connected.
+**Goal**: Fully functional offline; transparent bidirectional sync to GDrive.
 
-- [ ] Local-first reads: all content served from expo-sqlite + expo-file-system
+- [ ] All reads served from expo-sqlite + expo-file-system (local mirror)
 - [ ] Write queue: mutations buffered locally, flushed to backend on reconnect
-- [ ] Backend GDrive sync engine:
-  - [ ] Bidirectional: local SQLite ↔ GDrive markdown files
-  - [ ] Conflict detection: compare `updated_at` timestamps
-  - [ ] Conflict resolution: last-write-wins (personal tool default)
-  - [ ] Sync status per item: synced / pending / conflict
-- [ ] Network awareness: `@react-native-community/netinfo`
-- [ ] Background sync: Expo Background Fetch for periodic sync when app is closed
+- [ ] Backend GDrive sync engine: SQLite ↔ GDrive markdown files, bidirectional
+- [ ] Conflict resolution: last-write-wins (personal tool)
+- [ ] Sync status per item: synced / pending / conflict
+- [ ] `@react-native-community/netinfo` for connectivity awareness
+- [ ] Expo Background Fetch for periodic sync when app is closed
 - [ ] Sync status indicator in app header
-- [ ] PWA install prompt on web (Expo Web)
+- [ ] PWA install prompt on Expo Web
 
 ---
 
-## Docker Compose Services
+## Docker Compose
 
 ```yaml
 services:
@@ -337,26 +396,23 @@ services:
     build: ./backend
     ports: ["8000:8000"]
     volumes:
-      - ./data/db:/app/data       # SQLite + cached files
-    environment:
-      - GOOGLE_CLIENT_ID
-      - GOOGLE_CLIENT_SECRET
-      - REDIS_URL=redis://redis:6379
+      - ./data:/app/data          # SQLite DB + cached files
+    env_file: .env
     depends_on: [redis]
 
   worker:
     build: ./backend
-    command: celery -A app.workers worker
+    command: celery -A app.workers worker --loglevel=info
     volumes:
-      - ./data/db:/app/data
+      - ./data:/app/data
+    env_file: .env
     depends_on: [redis, backend]
 
   redis:
     image: redis:7-alpine
     volumes: ["redis_data:/data"]
 
-  # Optional: serve Expo web build
-  web:
+  web:                            # optional: serve Expo Web build
     image: nginx:alpine
     ports: ["3000:80"]
     volumes: ["./apps/mobile/dist:/usr/share/nginx/html:ro"]
@@ -367,39 +423,61 @@ volumes:
 
 ---
 
-## Open Questions (Deferred Decisions)
+## Environment Variables (`.env.example`)
+
+```env
+# Google OAuth + GDrive
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_REDIRECT_URI=http://localhost:8000/auth/callback
+
+# Gemini / Google AI
+GOOGLE_GENAI_API_KEY=          # Google AI Studio key (free tier available)
+GEMINI_MODEL=gemini-2.5-flash  # or gemini-2.5-pro
+
+# Celery / Redis
+REDIS_URL=redis://redis:6379/0
+
+# App
+SECRET_KEY=                    # for session signing
+DATABASE_URL=sqlite:////app/data/coscienza.db
+DATA_DIR=/app/data
+```
+
+---
+
+## Open Questions (Deferred)
 
 | # | Question | Default |
 |---|---|---|
-| 1 | PDF annotation format: sidecar `.md` vs embedded PDF annotations | Sidecar `.md` (human-readable) |
-| 2 | Audio transcription: faster-whisper locally vs OpenAI API | User-configurable (same as AI provider) |
-| 3 | Background job queue: Celery+Redis vs pure asyncio | Celery+Redis (more robust for ingestion) |
-| 4 | TenTap storage format: HTML vs JSON blocks vs markdown | Markdown (GDrive-friendly) |
-| 5 | `[[wikilink]]` resolution scope: notes only vs notes+sources | Notes + sources |
-| 6 | Conflict resolution strategy | Last-write-wins |
+| 1 | Conflict resolution strategy for GDrive sync | Last-write-wins |
+| 2 | Audio transcription: faster-whisper locally vs Gemini audio input | faster-whisper locally |
+| 3 | Upgrade to Vertex AI RAG Engine later? | sqlite-vec now, swap later |
+| 4 | `[[wikilink]]` scope: notes only vs notes + sources | Notes + sources |
+| 5 | Annotation position format for non-PDF sources | Char offset in markdown |
 
 ---
 
 ## Success Metrics
 
-- Import a PDF, read it, highlight it, ask questions about it in < 5 minutes
-- Capture a URL from iOS share-sheet in < 30 seconds
+- Import a PDF from the iOS share sheet in < 30 seconds
+- Ask a question about the library and get a cited answer in < 5 seconds
 - App works fully offline (flight mode)
-- All data readable without the app (plain markdown + PDFs in GDrive)
-- AI answers are cited and traceable to source location
+- All data readable without the app (plain `.md` + PDF in GDrive)
+- Chat answers are traceable to exact source + position
 
 ---
 
 ## Development Order
 
 ```
-Phase 1: Foundation + Ingestion   (defines data model + GDrive + Docker)
+Phase 1: Foundation + Ingestion + Chat  ← start here (defines everything)
      ↓
-Phase 2: PDF Reader + Annotations  (core reading workflow)
+Phase 2: Reader + Annotations
      ↓
-Phase 3: Knowledge Base + Editor   (note-taking + organization)
+Phase 3: Notes + Knowledge Base
      ↓
-Phase 4: AI Layer                  (query + extraction)
+Phase 4: AI Extraction
      ↓
-Phase 5: Offline + Sync            (resilience + mobile polish)
+Phase 5: Offline + GDrive Sync
 ```
