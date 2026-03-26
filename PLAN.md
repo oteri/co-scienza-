@@ -51,12 +51,13 @@ with a local SQLite index for fast search and AI grounding.
 |---|---|---|
 | Framework | **FastAPI** | Async, typed, fast |
 | Database | **SQLite** via **SQLAlchemy** + **Alembic** | Single-file DB, self-hosted friendly |
-| Vector store | **sqlite-vec** | Embedded vectors in SQLite — zero extra services |
-| Background jobs | **Celery** + **Redis** | Ingestion, embedding, sync jobs |
+| Background jobs | **Celery** + **Redis** | Ingestion and sync jobs |
 | GDrive sync | **google-api-python-client** | Read/write files, manage folder structure |
 | AI framework | **Google ADK** (`google-adk`) | Agent orchestration, tool use, grounding |
 | Gemini SDK | **Google GenAI SDK** (`google-genai`) | Underlying model access (ADK depends on this) |
-| Grounding / RAG | **ADK custom retrieval tool** → sqlite-vec | Self-hosted RAG; Vertex AI RAG Engine as upgrade path |
+| RAG | **Vertex AI RAG Engine** (`google-cloud-aiplatform`) | Managed RAG corpus backed by GDrive folder — no custom embedding code |
+| Search / data stores | **Discovery Engine API** (`google-cloud-discoveryengine`) | Corpus management, document import |
+| Grounding | **`VertexAiRagRetrieval`** (ADK built-in) + **`google_search`** tool | Library RAG + optional live web grounding |
 | Gemini model | **`gemini-2.5-flash`** (default) | Fast, large context, free tier available |
 | PDF extraction | **pypdf** + **pymupdf** | Text and page-level extraction |
 | Web scraping | **httpx** + **trafilatura** | URL → clean article markdown |
@@ -114,8 +115,8 @@ co-scienza/
 │   │   │   │   └── image.py
 │   │   │   ├── ai/
 │   │   │   │   ├── agent.py       ← ADK root agent definition
-│   │   │   │   ├── tools.py       ← retrieve_from_library, search_sources, etc.
-│   │   │   │   └── embeddings.py  ← chunk + embed pipeline
+│   │   │   │   ├── tools.py       ← search_sources_by_metadata, get_source_content
+│   │   │   │   └── datastore.py   ← Vertex AI RAG corpus client (create, import from GDrive)
 │   │   │   └── gdrive/
 │   │   │       ├── client.py      ← GDrive API wrapper
 │   │   │       └── sync.py        ← bidirectional sync engine
@@ -201,15 +202,7 @@ CREATE TABLE collection_items (
   collection_id TEXT, item_id TEXT, item_type TEXT  -- source | note
 );
 
--- Chunks + embeddings for RAG
-CREATE TABLE chunks (
-  id TEXT PRIMARY KEY,
-  entity_id TEXT, entity_type TEXT,  -- source | note | annotation
-  chunk_text TEXT,
-  chunk_index INTEGER,
-  model_id TEXT,
-  vector BLOB    -- via sqlite-vec
-);
+-- No chunks table — Vertex AI RAG Engine manages its own vectors from GDrive
 
 CREATE TABLE sync_log (
   id TEXT PRIMARY KEY,
@@ -230,16 +223,22 @@ CREATE TABLE adk_sessions (
 
 ---
 
-## AI Architecture — Google ADK
+## AI Architecture — Google ADK + Vertex AI Agent Builder
 
 ### Agent definition (`agent.py`)
 
 ```python
 from google.adk.agents import Agent
-from app.services.ai.tools import (
-    retrieve_from_library,
-    search_sources_by_metadata,
-    get_source_content,
+from google.adk.tools.vertex_ai_search_tool import VertexAiSearchTool
+from google.adk.tools import google_search
+from vertexai.preview.rag import RagRetrieval
+from app.services.ai.tools import search_sources_by_metadata, get_source_content
+from app.core.config import settings
+
+# VertexAiRagRetrieval is backed by the RAG corpus linked to GDrive /co-scienza/sources/
+rag_retrieval = RagRetrieval(
+    rag_corpus=settings.VERTEX_AI_RAG_CORPUS,
+    similarity_top_k=5,
 )
 
 root_agent = Agent(
@@ -247,37 +246,39 @@ root_agent = Agent(
     model="gemini-2.5-flash",
     description="Personal knowledge assistant. Answers questions grounded in the user's library.",
     instruction="""You are a personal research assistant with access to the user's knowledge library.
-Always ground your answers in the retrieved content. Cite sources with title and page/section.
+Always ground your answers in retrieved content from the library. Cite sources with title and page/section.
+Use google_search only when the user's question requires up-to-date information not in the library.
 If you don't find relevant content, say so clearly.""",
     tools=[
-        retrieve_from_library,   # semantic vector search → returns chunks
-        search_sources_by_metadata,  # filter by author, year, type, tag
-        get_source_content,      # fetch full content of a specific source
+        rag_retrieval,              # Vertex AI RAG Engine — semantic search over GDrive sources
+        search_sources_by_metadata, # filter by author, year, type, tag (SQLite query)
+        get_source_content,         # fetch full content.md of a specific source
+        google_search,              # live web grounding (used sparingly)
     ],
 )
 ```
+
+### Ingestion pipeline
+
+```
+User imports source
+    → content extracted (pypdf / trafilatura / youtube-transcript / whisper / Gemini)
+    → content.md + metadata.json saved to GDrive /co-scienza/sources/{year}/{slug}/
+    → Vertex AI RAG Engine re-indexes GDrive folder (triggered via datastore.py)
+    → source status set to "ready" in SQLite
+```
+
+No separate embedding step. RAG Engine handles chunking, embedding, and indexing from GDrive.
 
 ### Streaming chat endpoint
 
 ```python
 # POST /api/chat  →  SSE stream
-# - Creates or resumes an ADK session
+# - Creates or resumes an ADK session (stored in adk_sessions table)
 # - Streams Gemini response tokens as Server-Sent Events
-# - Citations attached to response events
+# - Citations in response events link back to source IDs
+# - Gemini API key / GCP credentials shared on backend — never sent to mobile
 ```
-
-### RAG tool (custom, self-hosted)
-
-```python
-@tool
-async def retrieve_from_library(query: str, top_k: int = 5) -> list[dict]:
-    """Retrieve relevant chunks from the user's library using semantic search."""
-    embedding = await embed(query)
-    chunks = sqlite_vec_search(embedding, top_k)
-    return [{"text": c.chunk_text, "source": c.entity_id, "title": c.title} for c in chunks]
-```
-
-**Upgrade path**: swap `sqlite_vec_search` for `VertexAiRagRetrieval` if moving to Vertex AI RAG Engine (no agent code changes needed).
 
 ---
 
@@ -289,22 +290,25 @@ async def retrieve_from_library(query: str, top_k: int = 5) -> list[dict]:
 
 #### Backend setup
 - [ ] FastAPI project, SQLAlchemy models, Alembic migrations
-- [ ] SQLite + sqlite-vec initialization
+- [ ] SQLite initialization (no sqlite-vec)
 - [ ] Google OAuth → GDrive access token storage
 - [ ] GDrive folder structure initialization on first run
+- [ ] Vertex AI RAG corpus creation — linked to GDrive `/co-scienza/sources/` folder; corpus resource name stored in `VERTEX_AI_RAG_CORPUS`
 - [ ] Celery + Redis worker setup
 - [ ] Docker Compose: `backend`, `worker`, `redis`
 
 #### Importers (Celery tasks)
-- [ ] **PDF upload** — pypdf text extraction → chunk → embed → GDrive
-- [ ] **URL** — trafilatura → markdown → chunk → embed → GDrive
-- [ ] **DOI** — CrossRef API → metadata + Unpaywall PDF → GDrive
-- [ ] **arXiv ID / URL** — arXiv API → metadata + PDF → GDrive
-- [ ] **PubMed ID** — NCBI API → metadata + PDF fallback
-- [ ] **YouTube URL** — youtube-transcript-api → markdown → chunk → embed → GDrive
-- [ ] **Audio file** — faster-whisper → transcript markdown → chunk → embed → GDrive
-- [ ] **Image** — Gemini multimodal → description markdown → embed → GDrive
-- [ ] **Plain text / markdown paste** — direct input → embed → GDrive
+All importers follow: **extract content → save to GDrive → trigger RAG Engine re-index**
+
+- [ ] **PDF upload** — pypdf text extraction → `content.md` + `source.pdf` → GDrive → RAG index
+- [ ] **URL** — trafilatura → `content.md` → GDrive → RAG index
+- [ ] **DOI** — CrossRef API → metadata + Unpaywall PDF → GDrive → RAG index
+- [ ] **arXiv ID / URL** — arXiv API → metadata + PDF → GDrive → RAG index
+- [ ] **PubMed ID** — NCBI API → metadata + PDF fallback → GDrive → RAG index
+- [ ] **YouTube URL** — youtube-transcript-api → `content.md` → GDrive → RAG index
+- [ ] **Audio file** — faster-whisper → transcript `content.md` → GDrive → RAG index
+- [ ] **Image** — Gemini multimodal → description `content.md` → GDrive → RAG index
+- [ ] **Plain text / markdown paste** — direct `content.md` → GDrive → RAG index
 
 #### Share intent (mobile)
 - [ ] **expo-share-intent** configured for iOS Share Extension + Android intent filters
@@ -318,12 +322,12 @@ async def retrieve_from_library(query: str, top_k: int = 5) -> list[dict]:
 - [ ] Source detail screen: metadata, tags, quick actions
 
 #### Chat with sources (ADK)
-- [ ] ADK root agent + tools wired up (`retrieve_from_library`, `search_sources_by_metadata`)
+- [ ] ADK root agent wired up (`VertexAiRagRetrieval`, `search_sources_by_metadata`, `google_search`)
 - [ ] `POST /api/chat` SSE streaming endpoint
 - [ ] Chat screen in app (streaming tokens, citations as tappable chips)
 - [ ] Scoped chat: all library / selected collection / selected source(s)
 - [ ] Session persistence (resume conversation across app restarts)
-- [ ] Gemini API key configuration in settings screen
+- [ ] Gemini API key + GCP credentials shared on backend (`.env`) — no per-device configuration
 
 ---
 
@@ -431,9 +435,16 @@ GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_REDIRECT_URI=http://localhost:8000/auth/callback
 
-# Gemini / Google AI
-GOOGLE_GENAI_API_KEY=          # Google AI Studio key (free tier available)
+# Gemini / Google AI (shared on backend — never sent to mobile)
+GOOGLE_GENAI_API_KEY=          # Google AI Studio key (for Gemini inference)
 GEMINI_MODEL=gemini-2.5-flash  # or gemini-2.5-pro
+
+# Vertex AI Agent Builder (GenAI App Builder — GCP project required)
+GOOGLE_CLOUD_PROJECT=
+VERTEX_AI_LOCATION=us-central1
+VERTEX_AI_RAG_CORPUS=          # full resource name — created on first run
+# Service account credentials: set GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
+# or mount the JSON file into the Docker container
 
 # Celery / Redis
 REDIS_URL=redis://redis:6379/0
@@ -452,9 +463,9 @@ DATA_DIR=/app/data
 |---|---|---|
 | 1 | Conflict resolution strategy for GDrive sync | Last-write-wins |
 | 2 | Audio transcription: faster-whisper locally vs Gemini audio input | faster-whisper locally |
-| 3 | Upgrade to Vertex AI RAG Engine later? | sqlite-vec now, swap later |
-| 4 | `[[wikilink]]` scope: notes only vs notes + sources | Notes + sources |
-| 5 | Annotation position format for non-PDF sources | Char offset in markdown |
+| 3 | `[[wikilink]]` scope: notes only vs notes + sources | Notes + sources |
+| 4 | Annotation position format for non-PDF sources | Char offset in markdown |
+| 5 | RAG corpus granularity: one corpus for all sources vs per-collection? | One global corpus |
 
 ---
 
