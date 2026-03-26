@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# uv
+uv.lock
+
+# Environment
+.env
+sa.json
+*.json.credentials
+
+# Data
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Node / Expo
+node_modules/
+.expo/
+dist/
+web-build/
+*.tsbuildinfo
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
