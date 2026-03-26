@@ -289,26 +289,28 @@ No separate embedding step. RAG Engine handles chunking, embedding, and indexing
 **Goal**: Import any content, store in GDrive, and immediately chat with it.
 
 #### Backend setup
-- [ ] FastAPI project, SQLAlchemy models, Alembic migrations
-- [ ] SQLite initialization (no sqlite-vec)
-- [ ] Google OAuth → GDrive access token storage
-- [ ] GDrive folder structure initialization on first run
-- [ ] Vertex AI RAG corpus creation — linked to GDrive `/co-scienza/sources/` folder; corpus resource name stored in `VERTEX_AI_RAG_CORPUS`
-- [ ] Celery + Redis worker setup
-- [ ] Docker Compose: `backend`, `worker`, `redis`
+- [x] FastAPI project, SQLAlchemy models (`app/models/`)
+- [x] SQLite async engine + session factory (`app/core/database.py`)
+- [ ] Alembic migrations (tables created via `Base.metadata.create_all` on startup for now)
+- [ ] Google OAuth → GDrive access token storage (OAuth flow scaffolded in `app/api/auth.py`; token persistence TODO)
+- [ ] GDrive folder structure initialization on first run (client scaffolded in `app/services/gdrive/client.py`; startup wiring TODO)
+- [ ] Vertex AI RAG corpus creation — linked to GDrive `/co-scienza/sources/` folder; corpus resource name stored in `VERTEX_AI_RAG_CORPUS` (client scaffolded in `app/services/ai/datastore.py`; wiring TODO)
+- [x] Celery + Redis worker setup (`app/workers/celery_app.py` + `ingest_tasks.py`)
+- [x] Docker Compose: `backend`, `worker`, `redis` (`docker-compose.yml`)
+- [x] `.env.example` with all variables annotated
 
 #### Importers (Celery tasks)
 All importers follow: **extract content → save to GDrive → trigger RAG Engine re-index**
 
-- [ ] **PDF upload** — pypdf text extraction → `content.md` + `source.pdf` → GDrive → RAG index
-- [ ] **URL** — trafilatura → `content.md` → GDrive → RAG index
-- [ ] **DOI** — CrossRef API → metadata + Unpaywall PDF → GDrive → RAG index
-- [ ] **arXiv ID / URL** — arXiv API → metadata + PDF → GDrive → RAG index
-- [ ] **PubMed ID** — NCBI API → metadata + PDF fallback → GDrive → RAG index
-- [ ] **YouTube URL** — youtube-transcript-api → `content.md` → GDrive → RAG index
-- [ ] **Audio file** — faster-whisper → transcript `content.md` → GDrive → RAG index
-- [ ] **Image** — Gemini multimodal → description `content.md` → GDrive → RAG index
-- [ ] **Plain text / markdown paste** — direct `content.md` → GDrive → RAG index
+- [x] **PDF upload** — pypdf/pymupdf extraction scaffolded (`app/services/ingest/pdf.py`); GDrive upload + RAG index TODO
+- [x] **URL** — trafilatura scraping scaffolded (`app/services/ingest/url.py`); GDrive upload + RAG index TODO
+- [x] **DOI** — CrossRef + Unpaywall scaffolded (`app/services/ingest/doi.py`); GDrive upload + RAG index TODO
+- [x] **arXiv ID / URL** — arXiv API + PDF download scaffolded (`app/services/ingest/arxiv.py`); GDrive upload + RAG index TODO
+- [ ] **PubMed ID** — not yet started
+- [x] **YouTube URL** — youtube-transcript-api scaffolded (`app/services/ingest/youtube.py`); GDrive upload + RAG index TODO
+- [x] **Audio file** — faster-whisper scaffolded (`app/services/ingest/audio.py`); GDrive upload + RAG index TODO
+- [x] **Image** — Gemini multimodal scaffolded (`app/services/ingest/image.py`); GDrive upload + RAG index TODO
+- [ ] **Plain text / markdown paste** — not yet started
 
 #### Share intent (mobile)
 - [ ] **expo-share-intent** configured for iOS Share Extension + Android intent filters
@@ -316,18 +318,24 @@ All importers follow: **extract content → save to GDrive → trigger RAG Engin
 - [ ] Background import if app is closed (Expo Background Task)
 
 #### Source library (mobile UI)
-- [ ] Source list screen: search, filter by type / tag / status
+- [x] Source list screen — basic list with status (`app/(tabs)/library.tsx`)
 - [ ] Import bottom sheet: pick type or auto-detect from URL/file
 - [ ] Import status polling (pending → processing → ready)
 - [ ] Source detail screen: metadata, tags, quick actions
 
 #### Chat with sources (ADK)
-- [ ] ADK root agent wired up (`VertexAiRagRetrieval`, `search_sources_by_metadata`, `google_search`)
-- [ ] `POST /api/chat` SSE streaming endpoint
-- [ ] Chat screen in app (streaming tokens, citations as tappable chips)
+- [x] ADK root agent scaffolded with `VertexAiRagRetrieval`, `search_sources_by_metadata`, `google_search` (`app/services/ai/agent.py`)
+- [x] `POST /api/chat` SSE streaming endpoint (`app/api/chat.py`)
+- [x] Chat screen in app with SSE streaming and session continuity (`app/(tabs)/chat.tsx`)
+- [ ] Citations as tappable chips linking back to source
 - [ ] Scoped chat: all library / selected collection / selected source(s)
-- [ ] Session persistence (resume conversation across app restarts)
-- [ ] Gemini API key + GCP credentials shared on backend (`.env`) — no per-device configuration
+- [ ] Session persistence to SQLite (currently in-memory `InMemorySessionService`)
+- [x] Gemini API key + GCP credentials shared on backend (`.env`) — no per-device configuration
+
+#### Notes (mobile UI — Phase 3 work started early)
+- [x] Note list screen (`app/(tabs)/notes.tsx`)
+- [x] Note editor: plain `TextInput` + `react-native-markdown-display` preview toggle (`app/note/[id].tsx`)
+- [x] Note CRUD API (`app/api/notes.py`) + TanStack Query hooks (`hooks/useNotes.ts`)
 
 ---
 
