@@ -1,4 +1,4 @@
-# co-scienza-
+# co-scienza
 co-scienza is an app to manage scientific knowledge.
 
 # Google Cloud prerequisites (do this first, blocks everything else)
